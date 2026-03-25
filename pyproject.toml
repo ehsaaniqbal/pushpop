@@ -1,0 +1,10 @@
+[project]
+name = "pushpop"
+version = "0.1.0"
+description = "Tiny stack-machine interpretability playground"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "torch",
+]
