@@ -11,6 +11,8 @@ from pushpop.pp0_dataset import (
     generate_program,
     write_dataset,
 )
+from pushpop.pp0_model import TinyTransformer, TinyTransformerConfig
+from pushpop.pp0_vocab import VOCAB_TOKENS, decode_ids, encode_tokens
 
 __all__ = [
     "DEFAULT_INSTRUCTION_SET",
@@ -20,7 +22,12 @@ __all__ = [
     "PP0ExecutionError",
     "ProgramExample",
     "TraceStep",
+    "TinyTransformer",
+    "TinyTransformerConfig",
+    "VOCAB_TOKENS",
     "anti_leakage_checks",
+    "decode_ids",
+    "encode_tokens",
     "execute",
     "generate_dataset",
     "generate_program",
