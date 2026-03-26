@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import random
 from typing import Any
@@ -224,6 +225,48 @@ def masked_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor) -> torc
         target_ids.reshape(-1),
         ignore_index=IGNORE_INDEX,
     )
+
+
+def learning_rate_for_step(
+    step_index: int,
+    *,
+    base_learning_rate: float,
+    total_steps: int,
+    scheduler_name: str = "none",
+    warmup_steps: int = 0,
+    min_learning_rate_scale: float = 0.1,
+) -> float:
+    if step_index < 0:
+        raise ValueError("step_index must be non-negative")
+    if base_learning_rate <= 0.0:
+        raise ValueError("base_learning_rate must be positive")
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if not 0 <= warmup_steps < total_steps:
+        raise ValueError("warmup_steps must satisfy 0 <= warmup_steps < total_steps")
+    if not 0.0 <= min_learning_rate_scale <= 1.0:
+        raise ValueError("min_learning_rate_scale must be between 0.0 and 1.0")
+    if scheduler_name == "none":
+        return base_learning_rate
+    if scheduler_name != "warmup_cosine":
+        raise ValueError(f"unsupported scheduler: {scheduler_name!r}")
+
+    if warmup_steps > 0 and step_index < warmup_steps:
+        return base_learning_rate * (step_index + 1) / warmup_steps
+
+    min_learning_rate = base_learning_rate * min_learning_rate_scale
+    decay_steps = total_steps - warmup_steps
+    decay_progress = (step_index - warmup_steps) / max(1, decay_steps - 1)
+    cosine_multiplier = 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+    return min_learning_rate + (base_learning_rate - min_learning_rate) * cosine_multiplier
+
+
+def set_optimizer_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    learning_rate: float,
+) -> None:
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = learning_rate
 
 
 @torch.no_grad()

@@ -12,6 +12,7 @@ from pushpop.pp0_training import (
     build_supervised_example,
     collate_supervised_examples,
     evaluate_model,
+    learning_rate_for_step,
     operation_composition_key,
     validate_dataset_row,
 )
@@ -210,6 +211,37 @@ class PP0TrainingTests(unittest.TestCase):
 
     def test_operation_composition_key_is_stable(self) -> None:
         self.assertEqual(operation_composition_key(["SWAP", "ADD", "DUP"]), "ADD+DUP+SWAP")
+
+    def test_learning_rate_for_step_returns_constant_rate_without_scheduler(self) -> None:
+        learning_rates = [
+            learning_rate_for_step(
+                step_index=step_index,
+                base_learning_rate=3e-4,
+                total_steps=10,
+            )
+            for step_index in range(10)
+        ]
+
+        self.assertEqual(learning_rates, [3e-4] * 10)
+
+    def test_learning_rate_for_step_matches_warmup_cosine_endpoints(self) -> None:
+        learning_rates = [
+            learning_rate_for_step(
+                step_index=step_index,
+                base_learning_rate=1.0,
+                total_steps=10,
+                scheduler_name="warmup_cosine",
+                warmup_steps=2,
+                min_learning_rate_scale=0.1,
+            )
+            for step_index in range(10)
+        ]
+
+        self.assertAlmostEqual(learning_rates[0], 0.5)
+        self.assertAlmostEqual(learning_rates[1], 1.0)
+        self.assertAlmostEqual(learning_rates[2], 1.0)
+        self.assertLess(learning_rates[3], learning_rates[2])
+        self.assertAlmostEqual(learning_rates[-1], 0.1)
 
     def test_evaluate_model_uses_rollout_for_sequence_metrics(self) -> None:
         row = {
