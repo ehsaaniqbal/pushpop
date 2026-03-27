@@ -9,7 +9,7 @@ docs:
 
 Current best checkpoints:
 
-- Best absolute test exact: `0.8634` from `artifacts/pp0_scaleup/run_4l384_100k_scratch_ft_lr1e4`
+- Best absolute test exact: `0.9248` from `artifacts/pp0_scaleup/run_4l384_300k_ft_lr1e4_bs128_4ep`
 - Best smaller-model test exact: `0.8600` from `artifacts/pp0_scaleup/run_from_best_data100k_lr1e4_plus8ep`
 
 Notes:
@@ -18,6 +18,7 @@ Notes:
 - `test top` = greedy-rollout top-of-stack accuracy on the held-out test split
 - `20k/2k/2k` is the baseline dataset in `artifacts/pp0_baseline/data`
 - `100k/5k/5k` is the scale-up dataset in `artifacts/pp0_scaleup/data_seed1_100k`
+- `300k/10k/10k` is the larger scale-up dataset in `artifacts/pp0_scaleup/data_seed2_300k`
 
 | Phase    | Run                                    | Data         | Model      | Train plan                        | Test exact | Test top | Note                             |
 | -------- | -------------------------------------- | ------------ | ---------- | --------------------------------- | ---------: | -------: | -------------------------------- |
@@ -36,4 +37,5 @@ Notes:
 | Scale-up | `run_4l384_100k_scratch_10ep`          | `100k/5k/5k` | `4L x 384` | `10ep from scratch, lr=3e-4`      |   `0.7026` | `0.8236` | bigger model was undertrained    |
 | Scale-up | `run_4l384_20k_to100k_12ep`            | `100k/5k/5k` | `4L x 384` | `20k pretrain -> 100k +12ep`      |   `0.6770` | `0.8032` | staged branch underperformed     |
 | Scale-up | `run_4l384_100k_scratch_plus10ep`      | `100k/5k/5k` | `4L x 384` | `resume +10ep, lr=3e-4`           |   `0.8346` | `0.8994` | more training mattered           |
-| Scale-up | `run_4l384_100k_scratch_ft_lr1e4`      | `100k/5k/5k` | `4L x 384` | `resume +8ep, lr=1e-4`            |   `0.8634` | `0.9150` | current best                     |
+| Scale-up | `run_4l384_100k_scratch_ft_lr1e4`      | `100k/5k/5k` | `4L x 384` | `resume +8ep, lr=1e-4`            |   `0.8634` | `0.9150` | best on the `100k` branch        |
+| Scale-up | `run_4l384_300k_ft_lr1e4_bs128_4ep`    | `300k/10k/10k` | `4L x 384` | `resume +4ep, bs=128, lr=1e-4`  |   `0.9248` | `0.9506` | current best, clean data-scale win |
