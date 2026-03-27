@@ -9,8 +9,8 @@ docs:
 
 Current best checkpoints:
 
-- Best absolute test exact: `0.9248` from `artifacts/pp0_scaleup/run_4l384_300k_ft_lr1e4_bs128_4ep`
-- Best smaller-model test exact: `0.8600` from `artifacts/pp0_scaleup/run_from_best_data100k_lr1e4_plus8ep`
+- Best absolute test exact: `0.9669` from `artifacts/pp0_scaleup/run_4l512_1m_scratch_ft_lr1e4_1ep`
+- Best smaller-model test exact: `0.9546` from `artifacts/pp0_scaleup/run_4l384_1m_ft_lr1e4_bs128_2ep`
 
 Notes:
 
@@ -39,3 +39,13 @@ Notes:
 | Scale-up | `run_4l384_100k_scratch_plus10ep`      | `100k/5k/5k` | `4L x 384` | `resume +10ep, lr=3e-4`           |   `0.8346` | `0.8994` | more training mattered           |
 | Scale-up | `run_4l384_100k_scratch_ft_lr1e4`      | `100k/5k/5k` | `4L x 384` | `resume +8ep, lr=1e-4`            |   `0.8634` | `0.9150` | best on the `100k` branch        |
 | Scale-up | `run_4l384_300k_ft_lr1e4_bs128_4ep`    | `300k/10k/10k` | `4L x 384` | `resume +4ep, bs=128, lr=1e-4`  |   `0.9248` | `0.9506` | current best, clean data-scale win |
+
+### Phase 1 Final Holdout
+
+Fresh untouched holdout: `artifacts/pp0_holdout/data_seed5_test10k`
+
+| Candidate                               | Model      | Test exact | Test top | Note                           |
+| --------------------------------------- | ---------- | ---------: | -------: | ------------------------------ |
+| `run_4l384_300k_ft_lr1e4_bs128_4ep`     | `4L x 384` |   `0.9259` | `0.9503` | previous real-test champion    |
+| `run_4l384_1m_ft_lr1e4_bs128_2ep`       | `4L x 384` |   `0.9546` | `0.9685` | `1M` smaller finalist          |
+| `run_4l512_1m_scratch_ft_lr1e4_1ep`     | `4L x 512` |   `0.9669` | `0.9773` | final Phase 1 winner           |
