@@ -1,21 +1,4 @@
-"""Reference interpreter for Pushpop-0 (PP0).
-
-Execution semantics, restated:
-
-- Programs are linear postfix token sequences ending with ``END``.
-- Tokens are whitespace-separated when provided as a string.
-- Digits ``0``..``9`` push themselves onto the stack.
-- ``DUP`` duplicates the top item, ``POP`` removes it, and ``SWAP`` swaps the top
-  two items.
-- ``ADD`` and ``SUB`` pop the top two items ``a b`` and push a single result in
-  ``Z_10``. ``SUB`` is order-sensitive and computes ``(a - b) mod 10``.
-- The interpreter is strict about malformed input and raises
-  ``PP0ExecutionError``. Data generation should still enforce validity upstream.
-
-The trace captures one record per executed token, including ``END``, with the
-full stack before and after that step. This makes the trace easy to align with
-token positions later during probing.
-"""
+"""Reference interpreter for Pushpop-0 (PP0)."""
 
 from __future__ import annotations
 
@@ -163,7 +146,9 @@ def execute(program: ProgramInput) -> ExecutionResult:
 
 def _validate_program_shape(tokens: tuple[str, ...]) -> None:
     if len(tokens) < 2:
-        raise PP0ExecutionError("program must contain at least one instruction before END")
+        raise PP0ExecutionError(
+            "program must contain at least one instruction before END"
+        )
 
     for pc, token in enumerate(tokens):
         if token not in VALID_TOKENS:
