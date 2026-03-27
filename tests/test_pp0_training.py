@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -13,6 +15,7 @@ from pushpop.pp0_training import (
     collate_supervised_examples,
     evaluate_model,
     learning_rate_for_step,
+    load_checkpoint,
     operation_composition_key,
     validate_dataset_row,
 )
@@ -277,6 +280,129 @@ class PP0TrainingTests(unittest.TestCase):
         self.assertEqual(metrics["overall"]["top_accuracy"], 0.0)
         self.assertEqual(metrics["overall"]["stop_accuracy"], 0.0)
         self.assertAlmostEqual(metrics["overall"]["token_accuracy"], 2 / 3)
+
+    def test_train_script_can_resume_from_checkpoint(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        script_path = repo_root / "scripts" / "train_pp0.py"
+        base_row = {
+            "program_text": "9 6 ADD DUP END",
+            "tokens": ["9", "6", "ADD", "DUP", "END"],
+            "trace": [
+                {"depth_after": 1, "stack_after": [9]},
+                {"depth_after": 2, "stack_after": [9, 6]},
+                {"depth_after": 1, "stack_after": [5]},
+                {"depth_after": 2, "stack_after": [5, 5]},
+                {"depth_after": 2, "stack_after": [5, 5]},
+            ],
+            "final_stack": [5, 5],
+            "final_top": 5,
+            "metadata": {
+                "program_length": 4,
+                "trace_length": 5,
+                "final_depth": 2,
+                "max_depth_reached": 2,
+                "ops_used": ["ADD", "DUP"],
+                "literal_values_used": [6, 9],
+            },
+        }
+
+        def row_for(split: str, example_id: str) -> dict[str, object]:
+            row = dict(base_row)
+            row["split"] = split
+            row["example_id"] = example_id
+            return row
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "data"
+            first_run_dir = root / "run1"
+            resumed_run_dir = root / "run2"
+            data_dir.mkdir()
+            (data_dir / "train.jsonl").write_text(
+                json.dumps(row_for("train", "train-000000")) + "\n",
+                encoding="utf-8",
+            )
+            (data_dir / "val.jsonl").write_text(
+                json.dumps(row_for("val", "val-000000")) + "\n",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--data-dir",
+                    str(data_dir),
+                    "--output-dir",
+                    str(first_run_dir),
+                    "--epochs",
+                    "1",
+                    "--batch-size",
+                    "1",
+                    "--learning-rate",
+                    "1e-3",
+                    "--weight-decay",
+                    "0.0",
+                    "--device",
+                    "cpu",
+                    "--context-length",
+                    "16",
+                    "--d-model",
+                    "32",
+                    "--d-mlp",
+                    "64",
+                    "--n-layers",
+                    "1",
+                    "--n-heads",
+                    "4",
+                    "--log-every",
+                    "1",
+                ],
+                check=True,
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+
+            resume_checkpoint = first_run_dir / "best.pt"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--data-dir",
+                    str(data_dir),
+                    "--output-dir",
+                    str(resumed_run_dir),
+                    "--resume-from",
+                    str(resume_checkpoint),
+                    "--epochs",
+                    "1",
+                    "--batch-size",
+                    "1",
+                    "--learning-rate",
+                    "1e-4",
+                    "--weight-decay",
+                    "0.0",
+                    "--device",
+                    "cpu",
+                    "--log-every",
+                    "1",
+                ],
+                check=True,
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+
+            resumed_config = json.loads((resumed_run_dir / "run_config.json").read_text())
+            resumed_checkpoint = load_checkpoint(resumed_run_dir / "last.pt", device=torch.device("cpu"))
+
+            self.assertEqual(resumed_config["resume_start_epoch"], 1)
+            self.assertEqual(resumed_config["context_length"], 16)
+            self.assertEqual(resumed_config["d_model"], 32)
+            self.assertEqual(resumed_config["learning_rate"], 1e-4)
+            self.assertEqual(resumed_checkpoint["epoch"], 2)
+            self.assertEqual(resumed_checkpoint["train_config"]["resume_from"], str(resume_checkpoint))
 
 
 if __name__ == "__main__":

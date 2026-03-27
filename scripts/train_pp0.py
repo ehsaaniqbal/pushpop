@@ -20,6 +20,7 @@ from pushpop.pp0_training import (
     collate_supervised_examples,
     evaluate_model,
     learning_rate_for_step,
+    load_checkpoint,
     masked_cross_entropy,
     save_checkpoint,
     set_optimizer_learning_rate,
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", choices=["none", "warmup_cosine"], default="none")
     parser.add_argument("--warmup-fraction", type=float, default=0.05)
     parser.add_argument("--min-learning-rate-scale", type=float, default=0.1)
+    parser.add_argument("--resume-from", type=Path, default=None)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--no-sanity-checks", action="store_true")
     return parser.parse_args()
@@ -58,6 +60,9 @@ def main() -> None:
 
     set_random_seed(args.seed)
     device = choose_device(args.device)
+    resume_checkpoint = None
+    start_epoch = 0
+    initial_metrics: dict[str, object] = {"epoch": 0, "train": {}, "val": {}}
 
     train_dataset = PP0SupervisedDataset(
         args.data_dir / "train.jsonl",
@@ -69,10 +74,6 @@ def main() -> None:
     )
 
     max_sequence_length = max(train_dataset.max_sequence_length, val_dataset.max_sequence_length)
-    if max_sequence_length > args.context_length:
-        raise ValueError(
-            f"dataset sequence length {max_sequence_length} exceeds context length {args.context_length}"
-        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -102,36 +103,59 @@ def main() -> None:
     else:
         warmup_steps = 0
 
-    model_config = TinyTransformerConfig(
-        vocab_size=len(VOCAB_TOKENS),
-        context_length=args.context_length,
-        d_model=args.d_model,
-        d_mlp=args.d_mlp,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-    )
+    if args.resume_from is not None:
+        resume_checkpoint = load_checkpoint(args.resume_from, device=device)
+        model_config = TinyTransformerConfig.from_dict(resume_checkpoint["model_config"])
+        start_epoch = int(resume_checkpoint["epoch"])
+        checkpoint_metrics = resume_checkpoint.get("metrics")
+        if isinstance(checkpoint_metrics, dict):
+            initial_metrics = dict(checkpoint_metrics)
+        else:
+            initial_metrics = {"epoch": start_epoch, "train": {}, "val": {}}
+    else:
+        model_config = TinyTransformerConfig(
+            vocab_size=len(VOCAB_TOKENS),
+            context_length=args.context_length,
+            d_model=args.d_model,
+            d_mlp=args.d_mlp,
+            n_layers=args.n_layers,
+            n_heads=args.n_heads,
+        )
+
+    if max_sequence_length > model_config.context_length:
+        raise ValueError(
+            f"dataset sequence length {max_sequence_length} exceeds context length {model_config.context_length}"
+        )
+
     model = TinyTransformer(model_config).to(device)
     optimizer = AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    if resume_checkpoint is not None:
+        model.load_state_dict(resume_checkpoint["model_state"])
+        optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
+        set_optimizer_learning_rate(optimizer, args.learning_rate)
 
     run_config = {
         "data_dir": str(args.data_dir),
         "output_dir": str(args.output_dir),
+        "resume_from": str(args.resume_from) if args.resume_from is not None else None,
+        "resume_start_epoch": start_epoch,
         "epochs": args.epochs,
+        "end_epoch": start_epoch + args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "grad_clip": args.grad_clip,
         "seed": args.seed,
         "device": str(device),
-        "context_length": args.context_length,
-        "d_model": args.d_model,
-        "d_mlp": args.d_mlp,
-        "n_layers": args.n_layers,
-        "n_heads": args.n_heads,
+        "context_length": model_config.context_length,
+        "d_model": model_config.d_model,
+        "d_mlp": model_config.d_mlp,
+        "n_layers": model_config.n_layers,
+        "n_heads": model_config.n_heads,
         "scheduler": args.scheduler,
         "warmup_fraction": args.warmup_fraction,
         "warmup_steps": warmup_steps,
@@ -145,11 +169,30 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    best_exact_match = float("-inf")
+    best_exact_match = float(initial_metrics.get("val", {}).get("exact_match", float("-inf")))
     metrics_path = args.output_dir / "metrics.jsonl"
     global_step = 0
+    if resume_checkpoint is not None:
+        save_checkpoint(
+            args.output_dir / "last.pt",
+            model=model,
+            optimizer=optimizer,
+            model_config=model_config.to_dict(),
+            train_config=run_config,
+            epoch=start_epoch,
+            metrics=initial_metrics,
+        )
+        save_checkpoint(
+            args.output_dir / "best.pt",
+            model=model,
+            optimizer=optimizer,
+            model_config=model_config.to_dict(),
+            train_config=run_config,
+            epoch=start_epoch,
+            metrics=initial_metrics,
+        )
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         model.train()
         running_loss_numerator = 0.0
         running_token_total = 0
