@@ -52,12 +52,15 @@ class ResidualIntervention:
     layer_name: str
     position_index: int
     replacement_vector: torch.Tensor
+    mode: str = "replace"
 
     def __post_init__(self) -> None:
         if self.position_index < 0:
             raise ValueError("position_index must be non-negative")
         if self.replacement_vector.ndim != 1:
             raise ValueError("replacement_vector must be one-dimensional")
+        if self.mode not in {"replace", "add"}:
+            raise ValueError("mode must be one of: replace, add")
 
 
 class CausalSelfAttention(nn.Module):
@@ -207,5 +210,8 @@ def _apply_residual_interventions(
                 f"replacement_vector for {intervention.layer_name} must have shape {(d_model,)}, "
                 f"got {tuple(replacement_vector.shape)}"
             )
-        x[:, intervention.position_index, :] = replacement_vector
+        if intervention.mode == "replace":
+            x[:, intervention.position_index, :] = replacement_vector
+        else:
+            x[:, intervention.position_index, :] += replacement_vector
     return x

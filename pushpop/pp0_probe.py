@@ -39,6 +39,29 @@ class LookupControlMetrics:
     unseen_test_fraction: float
 
 
+@dataclass(frozen=True, slots=True)
+class FittedRidgeProbe:
+    label_vocab: tuple[str, ...]
+    feature_mean: torch.Tensor
+    feature_std: torch.Tensor
+    weights: torch.Tensor
+    ridge_lambda: float
+    train_accuracy: float
+    val_accuracy: float
+    test_accuracy: float
+
+    def class_direction(self, label: str) -> torch.Tensor:
+        label_to_index = {name: index for index, name in enumerate(self.label_vocab)}
+        if label not in label_to_index:
+            raise ValueError(f"unknown probe label: {label!r}")
+        weight_vector = self.weights[:-1, label_to_index[label]]
+        raw_direction = weight_vector / self.feature_std.squeeze(0).to(dtype=self.weights.dtype)
+        return raw_direction.to(dtype=torch.float32)
+
+    def class_difference_direction(self, source_label: str, target_label: str) -> torch.Tensor:
+        return self.class_direction(source_label) - self.class_direction(target_label)
+
+
 def hidden_state_names(model: TinyTransformer) -> tuple[str, ...]:
     return ("embed", *(f"block_{index}" for index in range(model.config.n_layers)), "final_ln")
 
@@ -240,6 +263,73 @@ def fit_ridge_probe(
     if best_metrics is None:
         raise AssertionError("ridge probe selection produced no result")
     return best_metrics
+
+
+def fit_ridge_probe_model(
+    features: torch.Tensor,
+    labels: Sequence[str],
+    split_indices: dict[str, list[int]],
+    *,
+    ridge_lambdas: Sequence[float],
+    shuffle_train_labels: bool = False,
+    shuffle_seed: int = 0,
+) -> FittedRidgeProbe:
+    encoded_labels, label_vocab = _encode_labels(labels)
+    if len(label_vocab) <= 1:
+        raise ValueError("ridge probe model requires at least two labels")
+
+    train_indices = _index_tensor(split_indices["train"])
+    val_indices = _index_tensor(split_indices["val"])
+    test_indices = _index_tensor(split_indices["test"])
+
+    train_features = features.index_select(0, train_indices).to(dtype=torch.float64)
+    val_features = features.index_select(0, val_indices).to(dtype=torch.float64)
+    test_features = features.index_select(0, test_indices).to(dtype=torch.float64)
+
+    train_labels = encoded_labels.index_select(0, train_indices)
+    val_labels = encoded_labels.index_select(0, val_indices)
+    test_labels = encoded_labels.index_select(0, test_indices)
+    if shuffle_train_labels:
+        generator = torch.Generator().manual_seed(shuffle_seed)
+        train_labels = train_labels[torch.randperm(train_labels.shape[0], generator=generator)]
+
+    feature_mean = train_features.mean(dim=0, keepdim=True)
+    feature_std = train_features.std(dim=0, keepdim=True, unbiased=False).clamp_min(1e-6)
+    prepared_train = _append_bias_column((train_features - feature_mean) / feature_std)
+    prepared_val = _append_bias_column((val_features - feature_mean) / feature_std)
+    prepared_test = _append_bias_column((test_features - feature_mean) / feature_std)
+
+    best_model: FittedRidgeProbe | None = None
+    for ridge_lambda in ridge_lambdas:
+        if ridge_lambda <= 0.0:
+            raise ValueError("ridge_lambdas must be strictly positive")
+        weights = _fit_ridge_weights(
+            prepared_train,
+            train_labels,
+            num_classes=len(label_vocab),
+            ridge_lambda=float(ridge_lambda),
+        )
+        candidate = FittedRidgeProbe(
+            label_vocab=label_vocab,
+            feature_mean=feature_mean.cpu(),
+            feature_std=feature_std.cpu(),
+            weights=weights.cpu(),
+            ridge_lambda=float(ridge_lambda),
+            train_accuracy=_accuracy(prepared_train, weights, train_labels),
+            val_accuracy=_accuracy(prepared_val, weights, val_labels),
+            test_accuracy=_accuracy(prepared_test, weights, test_labels),
+        )
+        if best_model is None or candidate.val_accuracy > best_model.val_accuracy:
+            best_model = candidate
+            continue
+        if math.isclose(candidate.val_accuracy, best_model.val_accuracy) and (
+            candidate.ridge_lambda < best_model.ridge_lambda
+        ):
+            best_model = candidate
+
+    if best_model is None:
+        raise AssertionError("ridge probe model selection produced no result")
+    return best_model
 
 
 def majority_baseline_accuracy(

@@ -176,3 +176,102 @@ Key notes:
   - earlier residual streams carry information that later positions actually use
   - late probe-readability by itself does not guarantee causal leverage on later outputs
   - the winner appears more causally dependent on these mid-execution residual pathways than the smaller control
+
+## 2026-04-16: Milestone 5 Matched-Suffix Activation Patching
+
+Work:
+
+- Added milestone spec in `docs/pp0_phase2_m5.md`.
+- Added per-example rollout helpers and matched-suffix pair selection.
+- Added `scripts/causal_patch_pp0.py`.
+- Extended causal tests for rollout helpers and pair matching.
+
+Verification:
+
+- `uv run python -m unittest discover -s tests`
+- `uv run python scripts/causal_patch_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l512_1m_scratch_ft_lr1e4_1ep/best.pt --positions 12 15 --layers block_0 block_1 block_2 block_3 final_ln --pair-target top --max-pairs 64 --batch-size 256 --device auto --output-json artifacts/pp0_phase2/causal_patch_winner_holdout.json`
+- `uv run python scripts/causal_patch_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l384_1m_ft_lr1e4_bs128_2ep/best.pt --positions 12 15 --layers block_0 block_1 block_2 block_3 final_ln --pair-target top --max-pairs 64 --batch-size 256 --device auto --output-json artifacts/pp0_phase2/causal_patch_control_holdout.json`
+
+Outputs:
+
+- `artifacts/pp0_phase2/causal_patch_winner_holdout.json`
+- `artifacts/pp0_phase2/causal_patch_control_holdout.json`
+
+Key notes:
+
+- Pair matching rule is stricter than plain suffix matching:
+  - same current token at `pc_k`
+  - same suffix after `pc_k`
+  - different top-of-stack at `pc_k`
+  - both baseline rollouts already match their own gold outputs
+- This gives many valid counterfactual pairs:
+  - winner `pc_12`: `658584` candidates, `64` sampled
+  - winner `pc_15`: `539264` candidates, `64` sampled
+- Main metric is whether patching source state into the target makes the target output move toward the source.
+- Winner, source-top transfer:
+  - `pc_12` `block_0`: source-top `0.1250`, target-top `0.5469`
+  - `pc_12` `block_1`: source-top `0.1094`, target-top `0.7188`
+  - `pc_15` `block_0`: source-top `0.2500`, target-top `0.5000`
+  - `pc_15` `block_1`: source-top `0.1719`, target-top `0.5625`
+- Winner late-layer controls stay near zero transfer:
+  - `pc_12` `block_3`: source-top `0.0000`, target-top `1.0000`
+  - `pc_15` `final_ln`: source-top `0.0000`, target-top `1.0000`
+- The smaller control shows much weaker transfer at the same early sites:
+  - `pc_12` `block_0`: source-top `0.0312`, target-top `0.7969`
+  - `pc_15` `block_0`: source-top `0.0469`, target-top `0.8438`
+- Full-output transfer is much weaker than top transfer in both models:
+  - example: winner `pc_15` `block_0` source-full `0.0000`, source-top `0.2500`
+- Best current interpretation:
+  - earlier blocks carry state that can partially steer the shared continuation toward a different final top
+  - the winner supports much stronger causal top transfer than the smaller control
+  - this is still partial transfer, not full stack-state transplantation
+
+## 2026-04-16: Milestone 6 Probe-Direction Top Steering
+
+Work:
+
+- Added milestone spec in `docs/pp0_phase2_m6.md`.
+- Added additive residual interventions.
+- Added fitted ridge-probe objects that expose class-difference directions.
+- Added `scripts/causal_steer_pp0.py`.
+- Extended causal tests for additive intervention and steering script execution.
+
+Verification:
+
+- `uv run python -m unittest discover -s tests`
+- `uv run python scripts/causal_steer_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l512_1m_scratch_ft_lr1e4_1ep/best.pt --positions 12 15 --layers block_0 block_1 block_2 block_3 --alphas 0.5 1.0 2.0 4.0 --max-pairs 32 --batch-size 256 --device auto --output-json artifacts/pp0_phase2/causal_steer_winner_holdout.json`
+- `uv run python scripts/causal_steer_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l512_1m_scratch_ft_lr1e4_1ep/best.pt --positions 12 15 --layers block_0 block_1 --alphas 8 16 32 64 128 256 --max-pairs 32 --batch-size 256 --device auto --output-json artifacts/pp0_phase2/causal_steer_winner_holdout_highalpha.json`
+
+Outputs:
+
+- `artifacts/pp0_phase2/causal_steer_winner_holdout.json`
+- `artifacts/pp0_phase2/causal_steer_winner_holdout_highalpha.json`
+
+Key notes:
+
+- Setup:
+  - fit a linear `top` probe on probe-train examples
+  - pick matched-suffix test pairs with different top at `pc_k`
+  - add the source-minus-target probe direction to the target activation
+  - compare against shuffled-label probe directions
+- Pair counts were healthy:
+  - `pc_12`: `5750` candidate pairs, `32` sampled
+  - `pc_15`: `6146` candidate pairs, `32` sampled
+- Probe quality itself was non-trivial:
+  - `pc_12` `block_2` top probe test accuracy: `0.5927`
+  - `pc_15` `block_3` top probe test accuracy: `0.5050`
+- Result: **no measurable top steering**.
+  - source-top transfer stayed `0.0000` across the tested layers and alpha sweeps
+  - target-top retention stayed `1.0000`
+  - shuffled-label control was equally ineffective
+- This remained true even after a much larger alpha sweep focused on the causal layers:
+  - alphas `8, 16, 32, 64, 128, 256`
+  - still zero source-top transfer at `pc_12` / `pc_15` in `block_0` and `block_1`
+- Important interpretation:
+  - whole-vector patching works
+  - simple linear `top`-direction steering does **not**
+  - so the easy hypothesis “one probe-defined top direction is enough to drive the final top” is currently unsupported
+- Best current interpretation:
+  - `top` is linearly readable
+  - some earlier residual state is causally useful
+  - but the causally useful state is not isolated by this simple class-difference probe direction
