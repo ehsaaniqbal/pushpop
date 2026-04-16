@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import json
 import math
@@ -276,6 +276,7 @@ def greedy_rollout_batch(
     *,
     device: torch.device,
     max_new_tokens: int,
+    forward_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> list[list[int]]:
     if not prefixes:
         return []
@@ -283,6 +284,7 @@ def greedy_rollout_batch(
     context_length = getattr(getattr(model, "config", None), "context_length", None)
     if context_length is None:
         raise ValueError("model must expose config.context_length for rollout evaluation")
+    forward = model if forward_fn is None else forward_fn
 
     sequences = [list(prefix) for prefix in prefixes]
     generated = [[] for _ in prefixes]
@@ -310,7 +312,7 @@ def greedy_rollout_batch(
             )
             last_positions.append(len(sequence) - 1)
 
-        logits = model(input_ids)
+        logits = forward(input_ids)
         for row_index, example_index in enumerate(active_indices):
             next_token_id = int(logits[row_index, last_positions[row_index]].argmax().item())
             sequences[example_index].append(next_token_id)
@@ -328,8 +330,10 @@ def evaluate_model(
     device: torch.device,
     *,
     compute_slices: bool = False,
+    forward_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     model.eval()
+    forward = model if forward_fn is None else forward_fn
     overall = MetricAccumulator()
     slice_accumulators: dict[str, dict[str, MetricAccumulator]] = {
         "program_length": defaultdict(MetricAccumulator),
@@ -347,7 +351,7 @@ def evaluate_model(
         target_ids = target_ids_cpu.to(device)
         loss_mask = loss_mask_cpu.to(device)
 
-        logits = model(input_ids)
+        logits = forward(input_ids)
         loss = masked_cross_entropy(logits, target_ids)
         teacher_forced_predictions = logits.argmax(dim=-1)
         masked_tokens_in_batch = int(loss_mask.sum().item())
@@ -369,6 +373,7 @@ def evaluate_model(
             rollout_prefixes,
             device=device,
             max_new_tokens=max(len(target_tokens) for target_tokens in rollout_targets) + 2,
+            forward_fn=forward_fn,
         )
 
         for row_index, metadata in enumerate(batch["metadata"]):

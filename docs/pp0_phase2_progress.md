@@ -120,3 +120,59 @@ Key notes:
   - top: strong and online
   - one-below-top (`slot_1`): strong enough to take seriously
   - deeper slots: mixed evidence, with `slot_3` currently weak
+
+## 2026-04-16: Milestone 4 First Causal Panel
+
+Work:
+
+- Added milestone spec in `docs/pp0_phase2_m4.md`.
+- Added residual intervention support to the model forward path.
+- Added causal helpers in `pushpop/pp0_causal.py`.
+- Added `scripts/causal_ablate_pp0.py`.
+- Added tests for residual intervention behavior and causal script execution.
+
+Verification:
+
+- `uv run python -m unittest discover -s tests`
+- `uv run python scripts/causal_ablate_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l512_1m_scratch_ft_lr1e4_1ep/best.pt --positions 7 12 15 --layers block_0 block_1 block_2 block_3 final_ln --output-json artifacts/pp0_phase2/causal_mean_ablation_winner_holdout.json --batch-size 256 --device auto`
+- `uv run python scripts/causal_ablate_pp0.py --data-path artifacts/pp0_holdout/data_seed5_test10k/test.jsonl --checkpoint artifacts/pp0_scaleup/run_4l384_1m_ft_lr1e4_bs128_2ep/best.pt --positions 7 12 15 --layers block_0 block_1 block_2 block_3 final_ln --output-json artifacts/pp0_phase2/causal_mean_ablation_control_holdout.json --batch-size 256 --device auto`
+
+Outputs:
+
+- `artifacts/pp0_phase2/causal_mean_ablation_winner_holdout.json`
+- `artifacts/pp0_phase2/causal_mean_ablation_control_holdout.json`
+
+Key notes:
+
+- Intervention used: replace one residual vector at `(layer, pc_k)` with the mean vector from that same site over the evaluated subset, then rerun full rollout evaluation.
+- Each position is evaluated on the subset of examples that actually reach that position:
+  - `pc_7`: `9233` examples
+  - `pc_12`: `5414`
+  - `pc_15`: `3053`
+- The strongest causal effects in both models are in earlier blocks, especially `block_0`.
+- Winner, selected exact-match drops:
+  - `pc_12` `block_0`: `-0.3591`
+  - `pc_12` `block_1`: `-0.2355`
+  - `pc_12` `block_2`: `-0.0730`
+  - `pc_15` `block_0`: `-0.3721`
+  - `pc_15` `block_1`: `-0.2565`
+  - `pc_15` `block_2`: `-0.0714`
+- Smaller control, same sites:
+  - `pc_12` `block_0`: `-0.0406`
+  - `pc_12` `block_1`: `-0.0249`
+  - `pc_12` `block_2`: `-0.0078`
+  - `pc_15` `block_0`: `-0.1828`
+  - `pc_15` `block_1`: `-0.1343`
+  - `pc_15` `block_2`: `-0.0400`
+- Winner top-accuracy drops are also much larger than the control at the same sites:
+  - `pc_12` `block_0`: winner `-0.1956`, control `-0.0209`
+  - `pc_15` `block_0`: winner `-0.2244`, control `-0.0950`
+- `block_3` and `final_ln` at past program positions show essentially zero effect on future answer generation in both models.
+- This is an architectural lesson, not a failed experiment:
+  - in a decoder-only transformer, later positions can read earlier positions through **higher** layers
+  - once we are already at the final block output (`block_3`) for an earlier token, there is no later block left for future positions to use
+  - so strong late-layer probes can still coexist with weak or zero causal effect from ablating those same late-layer past-position states
+- Best current causal interpretation:
+  - earlier residual streams carry information that later positions actually use
+  - late probe-readability by itself does not guarantee causal leverage on later outputs
+  - the winner appears more causally dependent on these mid-execution residual pathways than the smaller control

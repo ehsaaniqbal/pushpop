@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Sequence
 import math
 from dataclasses import dataclass
 
@@ -43,6 +45,19 @@ class TinyTransformerConfig:
     @classmethod
     def from_dict(cls, data: dict[str, int]) -> "TinyTransformerConfig":
         return cls(**data)
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualIntervention:
+    layer_name: str
+    position_index: int
+    replacement_vector: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.position_index < 0:
+            raise ValueError("position_index must be non-negative")
+        if self.replacement_vector.ndim != 1:
+            raise ValueError("replacement_vector must be one-dimensional")
 
 
 class CausalSelfAttention(nn.Module):
@@ -118,6 +133,7 @@ class TinyTransformer(nn.Module):
         input_ids: torch.Tensor,
         *,
         return_hidden_states: bool = False,
+        interventions: Sequence[ResidualIntervention] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         batch_size, sequence_length = input_ids.shape
         if sequence_length > self.config.context_length:
@@ -125,14 +141,21 @@ class TinyTransformer(nn.Module):
                 f"sequence length {sequence_length} exceeds context length {self.config.context_length}"
             )
 
+        interventions_by_layer = _group_interventions_by_layer(interventions)
         positions = torch.arange(sequence_length, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
+        x = _apply_residual_interventions(x, interventions_by_layer.get("embed", ()))
         hidden_states: list[torch.Tensor] | None = [x] if return_hidden_states else None
-        for block in self.blocks:
+        for block_index, block in enumerate(self.blocks):
             x = block(x)
+            x = _apply_residual_interventions(
+                x,
+                interventions_by_layer.get(f"block_{block_index}", ()),
+            )
             if hidden_states is not None:
                 hidden_states.append(x)
         x = self.final_ln(x)
+        x = _apply_residual_interventions(x, interventions_by_layer.get("final_ln", ()))
         if hidden_states is not None:
             hidden_states.append(x)
 
@@ -149,3 +172,40 @@ class TinyTransformer(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+
+def _group_interventions_by_layer(
+    interventions: Sequence[ResidualIntervention] | None,
+) -> dict[str, tuple[ResidualIntervention, ...]]:
+    if not interventions:
+        return {}
+
+    grouped: dict[str, list[ResidualIntervention]] = defaultdict(list)
+    for intervention in interventions:
+        grouped[intervention.layer_name].append(intervention)
+    return {
+        layer_name: tuple(layer_interventions)
+        for layer_name, layer_interventions in grouped.items()
+    }
+
+
+def _apply_residual_interventions(
+    x: torch.Tensor,
+    interventions: Sequence[ResidualIntervention],
+) -> torch.Tensor:
+    if not interventions:
+        return x
+
+    x = x.clone()
+    d_model = x.shape[-1]
+    for intervention in interventions:
+        if intervention.position_index >= x.shape[1]:
+            continue
+        replacement_vector = intervention.replacement_vector.to(device=x.device, dtype=x.dtype)
+        if replacement_vector.shape != (d_model,):
+            raise ValueError(
+                f"replacement_vector for {intervention.layer_name} must have shape {(d_model,)}, "
+                f"got {tuple(replacement_vector.shape)}"
+            )
+        x[:, intervention.position_index, :] = replacement_vector
+    return x
