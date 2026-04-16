@@ -113,7 +113,12 @@ class TinyTransformer(nn.Module):
         self.unembed = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.apply(self._init_weights)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        return_hidden_states: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         batch_size, sequence_length = input_ids.shape
         if sequence_length > self.config.context_length:
             raise ValueError(
@@ -122,10 +127,19 @@ class TinyTransformer(nn.Module):
 
         positions = torch.arange(sequence_length, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
+        hidden_states: list[torch.Tensor] | None = [x] if return_hidden_states else None
         for block in self.blocks:
             x = block(x)
+            if hidden_states is not None:
+                hidden_states.append(x)
         x = self.final_ln(x)
-        return self.unembed(x)
+        if hidden_states is not None:
+            hidden_states.append(x)
+
+        logits = self.unembed(x)
+        if hidden_states is not None:
+            return logits, tuple(hidden_states)
+        return logits
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
