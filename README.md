@@ -71,13 +71,13 @@ Main evaluation metrics:
 - Token-controlled follow-up tests suggest that this head is better described as a local previous-token-conditioned mechanism than as a clean symbolic stack register
 - Probe readability, causal importance, and steerability separate in this model: readable features are not automatically isolated by simple causal feature-direction edits
 
-## What this does not show
+What this does not show yet:
 
-- It does **not** show that the model learned a literal symbolic stack data structure
-- It does **not** isolate a clean end-to-end stack circuit
-- It does **not** show that the full stack is robustly represented slot-by-slot
-- It does **not** imply that a successful linear probe corresponds to the model’s own internal readout
-- It does **not** say much by itself about broader language-model reasoning; this is a toy task on purpose
+- The model learned a literal symbolic stack data structure
+- A cleanly isolated end-to-end stack circuit
+- The full stack is robustly represented slot-by-slot
+- A successful linear probe corresponds to the model’s internal readout
+- Broad insights into language-model reasoning (this is intentionally a toy task)
 
 ## Run
 
