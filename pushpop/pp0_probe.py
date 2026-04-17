@@ -66,6 +66,26 @@ def hidden_state_names(model: TinyTransformer) -> tuple[str, ...]:
     return ("embed", *(f"block_{index}" for index in range(model.config.n_layers)), "final_ln")
 
 
+def component_output_names(model: TinyTransformer) -> tuple[str, ...]:
+    return tuple(
+        site_name
+        for block_index in range(model.config.n_layers)
+        for site_name in (f"block_{block_index}.attn", f"block_{block_index}.mlp")
+    )
+
+
+def attention_head_output_names(model: TinyTransformer) -> tuple[str, ...]:
+    return tuple(
+        f"block_{block_index}.attn_head_{head_index}"
+        for block_index in range(model.config.n_layers)
+        for head_index in range(model.config.n_heads)
+    )
+
+
+def attention_pattern_names(model: TinyTransformer) -> tuple[str, ...]:
+    return tuple(f"block_{block_index}.attn_pattern" for block_index in range(model.config.n_layers))
+
+
 def build_probe_splits(
     total_examples: int,
     *,
@@ -176,6 +196,7 @@ def capture_program_position_hidden_states(
     *,
     position_index: int,
     device: torch.device,
+    interventions: Sequence[Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     if position_index < 0:
         raise ValueError("position_index must be non-negative")
@@ -194,7 +215,11 @@ def capture_program_position_hidden_states(
             continue
 
         input_ids = batch["input_ids"].to(device)
-        _, hidden_states = model(input_ids, return_hidden_states=True)
+        _, hidden_states = model(
+            input_ids,
+            return_hidden_states=True,
+            interventions=interventions,
+        )
         row_indices = torch.tensor(available_rows, dtype=torch.long, device=device)
         position_tensor = torch.full(
             (len(available_rows),),
@@ -209,6 +234,145 @@ def capture_program_position_hidden_states(
     return {
         layer_name: torch.cat(chunks, dim=0)
         for layer_name, chunks in feature_chunks.items()
+        if chunks
+    }
+
+
+@torch.no_grad()
+def capture_program_position_component_outputs(
+    model: TinyTransformer,
+    dataloader: Iterable[dict[str, Any]],
+    *,
+    position_index: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if position_index < 0:
+        raise ValueError("position_index must be non-negative")
+
+    model.eval()
+    site_names = component_output_names(model)
+    feature_chunks = {name: [] for name in site_names}
+
+    for batch in dataloader:
+        available_rows = [
+            row_index
+            for row_index, metadata in enumerate(batch["metadata"])
+            if position_index <= int(metadata["program_length"])
+        ]
+        if not available_rows:
+            continue
+
+        input_ids = batch["input_ids"].to(device)
+        _, component_outputs = model(input_ids, return_component_outputs=True)
+        row_indices = torch.tensor(available_rows, dtype=torch.long, device=device)
+        position_tensor = torch.full(
+            (len(available_rows),),
+            position_index,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for site_name in site_names:
+            feature_chunks[site_name].append(
+                component_outputs[site_name][row_indices, position_tensor].cpu()
+            )
+
+    return {
+        site_name: torch.cat(chunks, dim=0)
+        for site_name, chunks in feature_chunks.items()
+        if chunks
+    }
+
+
+@torch.no_grad()
+def capture_program_position_attention_head_outputs(
+    model: TinyTransformer,
+    dataloader: Iterable[dict[str, Any]],
+    *,
+    position_index: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if position_index < 0:
+        raise ValueError("position_index must be non-negative")
+
+    model.eval()
+    site_names = attention_head_output_names(model)
+    feature_chunks = {name: [] for name in site_names}
+
+    for batch in dataloader:
+        available_rows = [
+            row_index
+            for row_index, metadata in enumerate(batch["metadata"])
+            if position_index <= int(metadata["program_length"])
+        ]
+        if not available_rows:
+            continue
+
+        input_ids = batch["input_ids"].to(device)
+        _, component_outputs = model(input_ids, return_component_outputs=True)
+        row_indices = torch.tensor(available_rows, dtype=torch.long, device=device)
+        position_tensor = torch.full(
+            (len(available_rows),),
+            position_index,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for site_name in site_names:
+            feature_chunks[site_name].append(
+                component_outputs[site_name][row_indices, position_tensor].cpu()
+            )
+
+    return {
+        site_name: torch.cat(chunks, dim=0)
+        for site_name, chunks in feature_chunks.items()
+        if chunks
+    }
+
+
+@torch.no_grad()
+def capture_program_position_attention_patterns(
+    model: TinyTransformer,
+    dataloader: Iterable[dict[str, Any]],
+    *,
+    position_index: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if position_index < 0:
+        raise ValueError("position_index must be non-negative")
+
+    model.eval()
+    site_names = attention_pattern_names(model)
+    feature_chunks = {name: [] for name in site_names}
+
+    for batch in dataloader:
+        available_rows = [
+            row_index
+            for row_index, metadata in enumerate(batch["metadata"])
+            if position_index <= int(metadata["program_length"])
+        ]
+        if not available_rows:
+            continue
+
+        input_ids = batch["input_ids"].to(device)
+        _, auxiliary_outputs = model(input_ids, return_attention_patterns=True)
+        row_indices = torch.tensor(available_rows, dtype=torch.long, device=device)
+        query_positions = torch.full(
+            (len(available_rows),),
+            position_index,
+            dtype=torch.long,
+            device=device,
+        )
+
+        for site_name in site_names:
+            attention_patterns = auxiliary_outputs[site_name]
+            feature_chunks[site_name].append(
+                attention_patterns[row_indices, :, query_positions, : position_index + 1].cpu()
+            )
+
+    return {
+        site_name: torch.cat(chunks, dim=0)
+        for site_name, chunks in feature_chunks.items()
         if chunks
     }
 

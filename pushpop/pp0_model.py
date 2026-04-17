@@ -73,7 +73,14 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(config.d_model, config.d_model)
         self.out_proj = nn.Linear(config.d_model, config.d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_head_outputs: bool = False,
+        return_attention_patterns: bool = False,
+        head_interventions: dict[int, Sequence[ResidualIntervention]] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch_size, sequence_length, d_model = x.shape
         query = self.q_proj(x).view(batch_size, sequence_length, self.n_heads, self.d_head)
         key = self.k_proj(x).view(batch_size, sequence_length, self.n_heads, self.d_head)
@@ -90,9 +97,44 @@ class CausalSelfAttention(nn.Module):
         )
         scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
         attention = torch.softmax(scores, dim=-1)
-        output = torch.matmul(attention, value)
-        output = output.transpose(1, 2).contiguous().view(batch_size, sequence_length, d_model)
-        return self.out_proj(output)
+        head_context = torch.matmul(attention, value).transpose(1, 2).contiguous()
+
+        has_head_interventions = bool(head_interventions) and any(
+            interventions for interventions in head_interventions.values()
+        )
+        if not return_head_outputs and not return_attention_patterns and not has_head_interventions:
+            output = head_context.view(batch_size, sequence_length, d_model)
+            return self.out_proj(output)
+
+        auxiliary: dict[str, torch.Tensor] = {}
+        if return_head_outputs or has_head_interventions:
+            out_weight_by_head = (
+                self.out_proj.weight.view(d_model, self.n_heads, self.d_head)
+                .permute(1, 0, 2)
+                .contiguous()
+            )
+            head_outputs = torch.einsum("bshd,hmd->bshm", head_context, out_weight_by_head)
+            if head_interventions:
+                for head_index, interventions in head_interventions.items():
+                    head_outputs[:, :, head_index, :] = _apply_residual_interventions(
+                        head_outputs[:, :, head_index, :],
+                        interventions,
+                    )
+
+            attention_update = head_outputs.sum(dim=2)
+            if self.out_proj.bias is not None:
+                attention_update = attention_update + self.out_proj.bias.view(1, 1, -1)
+            if return_head_outputs:
+                auxiliary["head_outputs"] = head_outputs
+        else:
+            attention_update = self.out_proj(head_context.view(batch_size, sequence_length, d_model))
+
+        if return_attention_patterns:
+            auxiliary["attention_patterns"] = attention
+
+        if not return_head_outputs and not return_attention_patterns:
+            return attention_update
+        return attention_update, auxiliary
 
 
 class MLP(nn.Module):
@@ -114,9 +156,45 @@ class TransformerBlock(nn.Module):
         self.ln_2 = nn.LayerNorm(config.d_model)
         self.mlp = MLP(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_component_outputs: bool = False,
+        return_attention_patterns: bool = False,
+        attention_interventions: Sequence[ResidualIntervention] | None = None,
+        attention_head_interventions: dict[int, Sequence[ResidualIntervention]] | None = None,
+        mlp_interventions: Sequence[ResidualIntervention] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        attention_output = self.attention(
+            self.ln_1(x),
+            return_head_outputs=return_component_outputs,
+            return_attention_patterns=return_attention_patterns,
+            head_interventions=attention_head_interventions,
+        )
+        if return_component_outputs or return_attention_patterns:
+            attention_update, attention_auxiliary = attention_output
+        else:
+            attention_update = attention_output
+        attention_update = _apply_residual_interventions(
+            attention_update,
+            attention_interventions or (),
+        )
+        x = x + attention_update
+
+        mlp_update = self.mlp(self.ln_2(x))
+        mlp_update = _apply_residual_interventions(mlp_update, mlp_interventions or ())
+        x = x + mlp_update
+
+        if return_component_outputs or return_attention_patterns:
+            block_outputs: dict[str, torch.Tensor] = {}
+            if return_component_outputs:
+                block_outputs["attn"] = attention_update
+                block_outputs["attn_heads"] = attention_auxiliary["head_outputs"]
+                block_outputs["mlp"] = mlp_update
+            if return_attention_patterns:
+                block_outputs["attn_patterns"] = attention_auxiliary["attention_patterns"]
+            return x, block_outputs
         return x
 
 
@@ -136,8 +214,15 @@ class TinyTransformer(nn.Module):
         input_ids: torch.Tensor,
         *,
         return_hidden_states: bool = False,
+        return_component_outputs: bool = False,
+        return_attention_patterns: bool = False,
         interventions: Sequence[ResidualIntervention] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, tuple[torch.Tensor, ...]]
+        | tuple[torch.Tensor, dict[str, torch.Tensor]]
+        | tuple[torch.Tensor, tuple[torch.Tensor, ...], dict[str, torch.Tensor]]
+    ):
         batch_size, sequence_length = input_ids.shape
         if sequence_length > self.config.context_length:
             raise ValueError(
@@ -149,8 +234,40 @@ class TinyTransformer(nn.Module):
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
         x = _apply_residual_interventions(x, interventions_by_layer.get("embed", ()))
         hidden_states: list[torch.Tensor] | None = [x] if return_hidden_states else None
+        auxiliary_outputs: dict[str, torch.Tensor] | None = (
+            {} if return_component_outputs or return_attention_patterns else None
+        )
         for block_index, block in enumerate(self.blocks):
-            x = block(x)
+            block_output = block(
+                x,
+                return_component_outputs=return_component_outputs,
+                return_attention_patterns=return_attention_patterns,
+                attention_interventions=interventions_by_layer.get(f"block_{block_index}.attn", ()),
+                attention_head_interventions={
+                    head_index: interventions_by_layer.get(
+                        f"block_{block_index}.attn_head_{head_index}",
+                        (),
+                    )
+                    for head_index in range(block.attention.n_heads)
+                },
+                mlp_interventions=interventions_by_layer.get(f"block_{block_index}.mlp", ()),
+            )
+            if return_component_outputs or return_attention_patterns:
+                x, block_component_outputs = block_output
+                assert auxiliary_outputs is not None
+                if return_component_outputs:
+                    auxiliary_outputs[f"block_{block_index}.attn"] = block_component_outputs["attn"]
+                    for head_index in range(block.attention.n_heads):
+                        auxiliary_outputs[f"block_{block_index}.attn_head_{head_index}"] = (
+                            block_component_outputs["attn_heads"][:, :, head_index, :]
+                        )
+                    auxiliary_outputs[f"block_{block_index}.mlp"] = block_component_outputs["mlp"]
+                if return_attention_patterns:
+                    auxiliary_outputs[f"block_{block_index}.attn_pattern"] = block_component_outputs[
+                        "attn_patterns"
+                    ]
+            else:
+                x = block_output
             x = _apply_residual_interventions(
                 x,
                 interventions_by_layer.get(f"block_{block_index}", ()),
@@ -163,8 +280,12 @@ class TinyTransformer(nn.Module):
             hidden_states.append(x)
 
         logits = self.unembed(x)
+        if hidden_states is not None and auxiliary_outputs is not None:
+            return logits, tuple(hidden_states), auxiliary_outputs
         if hidden_states is not None:
             return logits, tuple(hidden_states)
+        if auxiliary_outputs is not None:
+            return logits, auxiliary_outputs
         return logits
 
     @staticmethod

@@ -32,6 +32,24 @@ def build_mean_ablation_intervention(
     )
 
 
+def build_zero_ablation_intervention(
+    layer_features: dict[str, torch.Tensor],
+    *,
+    layer_name: str,
+    position_index: int,
+) -> ResidualIntervention:
+    if layer_name not in layer_features:
+        raise ValueError(f"unknown layer_name for zero ablation: {layer_name!r}")
+    features = layer_features[layer_name]
+    if features.ndim != 2 or features.shape[0] == 0:
+        raise ValueError(f"layer_features[{layer_name!r}] must have shape (n, d_model) with n > 0")
+    return ResidualIntervention(
+        layer_name=layer_name,
+        position_index=position_index,
+        replacement_vector=torch.zeros_like(features[0]).cpu(),
+    )
+
+
 def make_intervention_forward_fn(
     model: TinyTransformer,
     interventions: Sequence[ResidualIntervention],
@@ -231,4 +249,122 @@ def _stack_state_after_position(row: dict[str, Any], position_index: int) -> dic
         "stack": tuple(stack_after),
         "top": stack_after[-1] if stack_after else "EMPTY",
         "depth": len(stack_after),
+    }
+
+
+def run_site_patch_panel(
+    model: TinyTransformer,
+    position_examples: Sequence[SupervisedExample],
+    selected_pairs: Sequence[MatchedSuffixPair],
+    *,
+    source_site_features: torch.Tensor,
+    site_name: str,
+    position_index: int,
+    device: torch.device,
+) -> dict[str, object]:
+    def intervention_builder(pair: MatchedSuffixPair) -> list[ResidualIntervention]:
+        return [
+            ResidualIntervention(
+                layer_name=site_name,
+                position_index=position_index,
+                replacement_vector=source_site_features[pair.source_local_index].clone(),
+            )
+        ]
+
+    return run_pair_intervention_panel(
+        model,
+        position_examples,
+        selected_pairs,
+        intervention_builder=intervention_builder,
+        device=device,
+    )
+
+
+def run_pair_intervention_panel(
+    model: TinyTransformer,
+    position_examples: Sequence[SupervisedExample],
+    selected_pairs: Sequence[MatchedSuffixPair],
+    *,
+    intervention_builder: Callable[[MatchedSuffixPair], Sequence[ResidualIntervention]],
+    device: torch.device,
+) -> dict[str, object]:
+    if not selected_pairs:
+        return {
+            "pair_count": 0,
+            "patched_matches_source_full_rate": 0.0,
+            "patched_matches_target_full_rate": 0.0,
+            "patched_source_top_rate": 0.0,
+            "patched_target_top_rate": 0.0,
+            "patched_source_depth_rate": 0.0,
+            "patched_target_depth_rate": 0.0,
+            "sample_results": [],
+        }
+
+    patched_matches_source_full = 0
+    patched_matches_target_full = 0
+    patched_source_top = 0
+    patched_target_top = 0
+    patched_source_depth = 0
+    patched_target_depth = 0
+    sample_results: list[dict[str, object]] = []
+
+    for pair in selected_pairs:
+        source_example = position_examples[pair.source_local_index]
+        target_example = position_examples[pair.target_local_index]
+        source_target = rollout_target_for_example(source_example)
+        target_target = rollout_target_for_example(target_example)
+        source_stack = stack_ids_from_rollout_prediction(source_target)
+        target_stack = stack_ids_from_rollout_prediction(target_target)
+
+        interventions = list(intervention_builder(pair))
+        patched_prediction = rollout_supervised_example(
+            model,
+            target_example,
+            device,
+            forward_fn=make_intervention_forward_fn(model, interventions),
+        )
+        patched_stack = stack_ids_from_rollout_prediction(patched_prediction)
+
+        source_full_match = patched_prediction == source_target
+        target_full_match = patched_prediction == target_target
+        source_top_match = bool(patched_stack and source_stack and patched_stack[-1] == source_stack[-1])
+        target_top_match = bool(patched_stack and target_stack and patched_stack[-1] == target_stack[-1])
+        source_depth_match = len(patched_stack) == len(source_stack)
+        target_depth_match = len(patched_stack) == len(target_stack)
+
+        patched_matches_source_full += int(source_full_match)
+        patched_matches_target_full += int(target_full_match)
+        patched_source_top += int(source_top_match)
+        patched_target_top += int(target_top_match)
+        patched_source_depth += int(source_depth_match)
+        patched_target_depth += int(target_depth_match)
+
+        if len(sample_results) < 5:
+            sample_results.append(
+                {
+                    "source_example_id": source_example.example_id,
+                    "target_example_id": target_example.example_id,
+                    "source_top": pair.source_top,
+                    "target_top": pair.target_top,
+                    "source_depth": pair.source_depth,
+                    "target_depth": pair.target_depth,
+                    "patched_top": patched_stack[-1] if patched_stack else None,
+                    "patched_depth": len(patched_stack),
+                    "patched_matches_source_full": source_full_match,
+                    "patched_matches_target_full": target_full_match,
+                    "patched_source_top_match": source_top_match,
+                    "patched_target_top_match": target_top_match,
+                }
+            )
+
+    pair_count = len(selected_pairs)
+    return {
+        "pair_count": pair_count,
+        "patched_matches_source_full_rate": patched_matches_source_full / pair_count,
+        "patched_matches_target_full_rate": patched_matches_target_full / pair_count,
+        "patched_source_top_rate": patched_source_top / pair_count,
+        "patched_target_top_rate": patched_target_top / pair_count,
+        "patched_source_depth_rate": patched_source_depth / pair_count,
+        "patched_target_depth_rate": patched_target_depth / pair_count,
+        "sample_results": sample_results,
     }
